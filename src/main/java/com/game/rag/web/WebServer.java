@@ -11,6 +11,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
@@ -56,6 +57,7 @@ public class WebServer {
         server.createContext("/", this::handleIndex);          // 首页
         server.createContext("/api/ask", this::handleAsk);     // 问答 API
         server.createContext("/api/upload", this::handleUpload); // 上传文件 API
+        server.createContext("/static/", this::handleStatic);  // 静态资源
 
         server.setExecutor(null); // 使用默认的线程池
     }
@@ -170,6 +172,50 @@ public class WebServer {
         }
     }
 
+    /**
+     * 静态资源路由：GET /static/* → 从 classpath:/static/ 读取文件。
+     * 用于提供头像图片等静态资源。
+     */
+    private void handleStatic(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+
+        // 提取 /static/ 后面的路径
+        String path = exchange.getRequestURI().getPath();
+        String fileName = path.substring("/static/".length());
+        if (fileName.isBlank() || fileName.contains("..") || fileName.contains("\\")) {
+            sendResponse(exchange, 404, "text/plain", "Not Found");
+            return;
+        }
+
+        String resourcePath = "/static/" + fileName;
+        InputStream is = getClass().getResourceAsStream(resourcePath);
+        if (is == null) {
+            sendResponse(exchange, 404, "text/plain", "Not Found");
+            return;
+        }
+
+        byte[] bytes = is.readAllBytes();
+        is.close();
+
+        // 根据文件头 magic bytes 检测真实格式（兼容 .png 后缀但内容是 JPEG 的情况）
+        String contentType = "application/octet-stream";
+        if (bytes.length > 4) {
+            int h = ((bytes[0] & 0xFF) << 24) | ((bytes[1] & 0xFF) << 16)
+                  | ((bytes[2] & 0xFF) << 8)  |  (bytes[3] & 0xFF);
+            if (h == 0x89504E47)       contentType = "image/png";
+            else if (h == 0xFFD8FFE0 || h == 0xFFD8FFE1 || h == 0xFFD8FFE2
+                  || (h & 0xFFFF0000) == 0xFFD80000) contentType = "image/jpeg";
+            else if (h == 0x47494638)  contentType = "image/gif";
+            else if (bytes[0] == '<' && bytes[1] == 's' && bytes[2] == 'v' && bytes[3] == 'g')
+                contentType = "image/svg+xml";
+        }
+
+        sendResponse(exchange, 200, contentType, bytes);
+    }
+
     // ==================== 辅助方法 ====================
 
     /**
@@ -226,9 +272,13 @@ public class WebServer {
      */
     private static void sendResponse(HttpExchange exchange, int statusCode, String contentType, String body)
             throws IOException {
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        sendResponse(exchange, statusCode, contentType, body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void sendResponse(HttpExchange exchange, int statusCode, String contentType, byte[] bytes)
+            throws IOException {
         exchange.getResponseHeaders().set("Content-Type", contentType);
-        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");  // 允许跨域
+        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         exchange.sendResponseHeaders(statusCode, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
@@ -396,59 +446,85 @@ public class WebServer {
                     .drag-overlay .drop-zone .drop-text { font-size: 16px; }
                     .drag-overlay .drop-zone .drop-ext  { font-size: 12px; color: var(--text-faint); margin-top: 6px; }
 
-                    /* ── Conversation ── */
-                    .conv-item {
-                        margin-bottom: 32px;
-                    }
-
-                    .user-msg {
+                    /* ── Conversation bubbles ── */
+                    .msg-row {
                         display: flex;
                         align-items: flex-start;
                         gap: 10px;
-                        margin-bottom: 18px;
+                        margin-bottom: 24px;
                     }
-                    .user-msg .avatar {
+                    /* User: right-aligned */
+                    .msg-row.user {
+                        flex-direction: row-reverse;
+                    }
+
+                    .msg-avatar {
                         flex-shrink: 0;
-                        width: 30px; height: 30px;
+                        width: 38px; height: 38px;
                         border-radius: 50%;
-                        background: var(--bg);
+                        position: relative;
+                        overflow: hidden;
+                        background: var(--bg-card);
                         border: 1px solid var(--border);
+                    }
+                    .msg-avatar img {
+                        width: 100%; height: 100%;
+                        object-fit: cover;
+                        display: block;
+                        position: relative;
+                        z-index: 1;
+                    }
+                    /* Fallback placeholder shown when img is removed (onerror) */
+                    .msg-avatar .avatar-placeholder {
+                        position: absolute;
+                        inset: 0;
                         display: flex;
                         align-items: center;
                         justify-content: center;
-                        font-size: 15px;
+                        font-size: 18px;
                         color: var(--text-muted);
+                        z-index: 0;
                     }
-                    .user-msg .body {
-                        flex: 1;
-                        padding: 12px 16px;
-                        border-radius: var(--radius-sm);
+
+                    .msg-bubble {
+                        max-width: 82%;
+                        padding: 12px 18px;
+                        border-radius: 16px;
                         font-size: 15px;
+                        line-height: 1.65;
+                        word-break: break-word;
+                    }
+                    /* AI bubble: left, slightly lighter background */
+                    .msg-row.ai .msg-bubble {
+                        background: #242424;
+                        border: 1px solid rgba(255,255,255,0.05);
                         color: var(--text);
-                        border: 1px solid transparent;
-                        background: transparent;
+                        border-top-left-radius: 4px;
                     }
-
-                    .ai-msg {
-                        padding: 20px 0 0 0;
-                    }
-                    .ai-msg .content {
-                        font-size: 15px;
-                        line-height: 1.75;
+                    /* User bubble: right, warm-tinted dark */
+                    .msg-row.user .msg-bubble {
+                        background: #2A231E;
+                        border: 1px solid rgba(217,119,87,0.10);
                         color: var(--text);
+                        border-top-right-radius: 4px;
                     }
 
-                    .ai-msg .content h3 { font-size: 17px; font-weight: 600; margin: 20px 0 8px; color: var(--text); }
-                    .ai-msg .content h4 { font-size: 15px; font-weight: 600; margin: 16px 0 6px; color: var(--text); }
-                    .ai-msg .content p  { margin: 0 0 10px; }
-                    .ai-msg .content ul, .ai-msg .content ol { margin: 4px 0 12px 20px; }
-                    .ai-msg .content li { margin-bottom: 4px; }
-                    .ai-msg .content strong { font-weight: 600; color: var(--text); }
-                    .ai-msg .content em { font-style: italic; color: var(--text-muted); }
+                    /* AI bubble Markdown */
+                    .msg-row.ai .msg-bubble h3 {
+                        font-size: 17px; font-weight: 600; margin: 16px 0 8px; color: var(--text);
+                    }
+                    .msg-row.ai .msg-bubble h4 {
+                        font-size: 15px; font-weight: 600; margin: 14px 0 6px; color: var(--text);
+                    }
+                    .msg-row.ai .msg-bubble p  { margin: 0 0 10px; }
+                    .msg-row.ai .msg-bubble ul, .msg-row.ai .msg-bubble ol { margin: 4px 0 12px 20px; }
+                    .msg-row.ai .msg-bubble li { margin-bottom: 4px; }
+                    .msg-row.ai .msg-bubble strong { font-weight: 600; color: var(--text); }
+                    .msg-row.ai .msg-bubble em { font-style: italic; color: var(--text-muted); }
 
-                    /* ── Sources ── */
+                    /* ── Sources (inside AI bubble) ── */
                     .sources {
-                        margin-top: 18px;
+                        margin-top: 14px;
                     }
                     .sources summary {
                         cursor: pointer;
@@ -629,9 +705,11 @@ public class WebServer {
                         .input-bar-wrap { padding: 8px 14px 18px; }
                         .input-bar input { padding: 11px 14px; font-size: 14px; }
                         .input-bar button { padding: 11px 18px; font-size: 14px; }
-                        .ai-msg .content h3 { font-size: 16px; }
                         .drag-overlay .drop-zone { padding: 32px 40px; }
-                    }
+                        .msg-avatar { width: 32px; height: 32px; }
+                        .msg-bubble { max-width: 88%; font-size: 14px; padding: 10px 14px; }
+                        .msg-row.ai .msg-bubble h3 { font-size: 16px; }
+}
                 </style>
             </head>
             <body>
@@ -805,6 +883,20 @@ public class WebServer {
                     hideFileCard();
                 });
 
+                /* ── Avatar helper ── */
+                function userAvatar() {
+                    return '<div class="msg-avatar">' +
+                        '<img src="/static/user-avatar.png" alt="" onerror="this.remove()">' +
+                        '<span class="avatar-placeholder">&#x1F3AE;</span>' +
+                    '</div>';
+                }
+                function aiAvatar() {
+                    return '<div class="msg-avatar">' +
+                        '<img src="/static/ai-avatar.png" alt="" onerror="this.remove()">' +
+                        '<span class="avatar-placeholder">✦</span>' +
+                    '</div>';
+                }
+
                 /* ── Send question ── */
                 async function askQuestion() {
                     var input = document.getElementById('questionInput');
@@ -820,19 +912,26 @@ public class WebServer {
                     var welcome = document.getElementById('welcomeBox');
                     if (welcome) welcome.remove();
 
-                    var conv = document.createElement('div');
-                    conv.className = 'conv-item';
-                    conv.innerHTML =
-                        '<div class="user-msg">' +
-                            '<div class="avatar">&#x1F3AE;</div>' +
-                            '<div class="body">' + escapeHtml(question) + '</div>' +
-                        '</div>' +
-                        '<div class="ai-msg">' +
+                    // User bubble row
+                    var userRow = document.createElement('div');
+                    userRow.className = 'msg-row user';
+                    userRow.innerHTML =
+                        userAvatar() +
+                        '<div class="msg-bubble">' + escapeHtml(question) + '</div>';
+                    chatArea.appendChild(userRow);
+
+                    // AI loading row
+                    var aiRow = document.createElement('div');
+                    aiRow.className = 'msg-row ai';
+                    aiRow.innerHTML =
+                        aiAvatar() +
+                        '<div class="msg-bubble">' +
                             '<div class="loading-dots">' +
                                 '<div class="dot"></div><div class="dot"></div><div class="dot"></div>' +
                             '</div>' +
                         '</div>';
-                    chatArea.appendChild(conv);
+                    chatArea.appendChild(aiRow);
+
                     window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
 
                     try {
@@ -843,17 +942,15 @@ public class WebServer {
                         });
                         var data = await resp.json();
 
-                        var aiMsg = conv.querySelector('.ai-msg');
-                        aiMsg.innerHTML = '';
+                        var bubble = aiRow.querySelector('.msg-bubble');
+                        bubble.innerHTML = '';
 
                         if (data.error) {
-                            aiMsg.innerHTML = '<div class="error-msg">' + escapeHtml(data.error) + '</div>';
+                            bubble.innerHTML = '<div class="error-msg">' + escapeHtml(data.error) + '</div>';
                         } else {
-                            var contentDiv = document.createElement('div');
-                            contentDiv.className = 'content';
-                            contentDiv.innerHTML = renderMarkdown(data.answer);
-                            aiMsg.appendChild(contentDiv);
+                            bubble.innerHTML = renderMarkdown(data.answer);
 
+                            // Sources inside the AI bubble, below the answer
                             if (data.sources && data.sources.length > 0) {
                                 var details = document.createElement('details');
                                 details.className = 'sources';
@@ -875,12 +972,12 @@ public class WebServer {
                                         '</div>';
                                 });
                                 details.appendChild(list);
-                                aiMsg.appendChild(details);
+                                bubble.appendChild(details);
                             }
                         }
                     } catch (err) {
-                        var aiMsg2 = conv.querySelector('.ai-msg');
-                        aiMsg2.innerHTML = '<div class="error-msg">请求失败：' + escapeHtml(err.message) + '</div>';
+                        var bubble2 = aiRow.querySelector('.msg-bubble');
+                        bubble2.innerHTML = '<div class="error-msg">请求失败：' + escapeHtml(err.message) + '</div>';
                     }
 
                     input.disabled = false;

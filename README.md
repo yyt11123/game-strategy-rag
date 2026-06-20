@@ -2,7 +2,7 @@
 
 > 基于 **RAG（检索增强生成）+ 通义千问 qwen-plus** 的游戏攻略智能问答系统。
 > 支持自然语言提问，从本地攻略文档中检索相关内容，生成带来源标注的回答。
-> 提供三种交互模式：**控制台 RAG 问答**、**Agent 智能问答**、**暗色 Claude 风格 Web 界面**。
+> 提供三种交互模式：**控制台 RAG 问答**、**Agent 智能问答**、**暗色 Claude 风格 Web 界面（支持拖拽上传动态知识库）**。
 
 ---
 
@@ -225,16 +225,27 @@ mvn exec:java -Dexec.args="web"
 
 **界面特点：**
 - 暗色 Claude 风格，暖橙 `#D97757` 强调色，深炭灰 `#1A1A1A` 底色
-- 时间感知开屏问候（"Good morning / Good afternoon / Good evening"）
-- 用户提问与 AI 回答左右分明，支持 Markdown 渲染
+- 时间感知开屏问候（"Good morning / Good afternoon / Good evening"），Georgia 衬线字体
+- **拖拽上传动态知识库**：将 `.txt` 或 `.pdf` 文件拖入页面即可自动解析、向量化、入库，随后提问基于上传文件检索作答，来源标注上传文件名
+- 上传后显示文件名卡片 + 解析状态，支持移除回退到 `documents/` 预设知识库
+- 用户提问与 AI 回答左右分明，支持 Markdown 渲染（标题、列表、加粗、斜体）
 - 参考来源可折叠，样式低调
-- 底部输入框固定，Enter 发送，三点跳动加载动画
+- 底部输入框固定，Enter 发送，三点跳动加载动画，Toast 通知
 - 响应式布局，手机/平板均可正常使用
+
+**操作步骤（拖拽上传）：**
+1. 从桌面拖一个 `.txt` 或 `.pdf` 攻略文件到页面 → 看到浮层提示"松开以添加文件"→ 松手
+2. 底部出现文件卡片 → 显示"正在解析…" → 变为"已就绪，可开始提问"
+3. 输入问题并发送 → AI 基于上传文件检索作答，来源显示上传文件名
+4. 点击卡片右侧 ✕ 移除文件 → 之后提问回退到 `documents/` 知识库
+5. 不拖文件也能直接提问，基于 `documents/` 预设攻略作答
 
 **验收标准：**
 - Web 界面美观可用，中文输入输出正常
 - 提问后 AI 基于攻略作答，回答下方可展开参考来源
 - 攻略外的内容正确拒答
+- 拖拽上传 .txt/.pdf 后提问可检索到上传文件内容
+- 移除上传文件后正确回退到预设知识库
 
 ---
 
@@ -267,7 +278,7 @@ mvn exec:java -Dexec.args="web"
 
 ```
 game-strategy-rag/
-├── pom.xml                           # Maven 配置
+├── pom.xml                           # Maven 配置（含 Gson 2.11.0）
 ├── README.md                         # 本文档
 ├── .gitignore                        # Git 忽略规则
 ├── .vscode/
@@ -276,21 +287,21 @@ game-strategy-rag/
 │   └── sample_strategy.txt           # 示例攻略
 └── src/main/
     ├── java/com/game/rag/
-    │   ├── Main.java                 # 程序入口
+    │   ├── Main.java                 # 程序入口（UTF-8 编码 fix）
     │   ├── config/
     │   │   └── ModelConfig.java      # 模型初始化配置
     │   ├── rag/
-    │   │   ├── KnowledgeBase.java    # 知识库（读/切/向量化/检索）
-    │   │   ├── RagService.java       # RAG 调度（检索+生成+来源）
+    │   │   ├── KnowledgeBase.java    # 知识库（读/切/向量化/检索 + addDocument）
+    │   │   ├── RagService.java       # RAG 调度（SystemMessage/UserMessage fix）
     │   │   ├── RagAnswer.java        # 回答对象（含来源）
-    │   │   └── SearchResult.java     # 检索结果
+    │   │   └── SearchResult.java     # 检索结果 record
     │   ├── agent/
     │   │   ├── GameAssistantAgent.java  # Agent 定义
     │   │   └── tools/
     │   │       ├── StrategyTool.java    # 查攻略工具
     │   │       └── CalculatorTool.java  # 计算工具
     │   └── web/
-    │       └── WebServer.java        # Web 服务（内嵌 HTML/CSS/JS 界面）
+    │       └── WebServer.java        # Web 服务（内嵌 HTML/CSS/JS + Gson JSON）
     └── resources/
         └── logback.xml               # 日志配置
 ```
@@ -316,6 +327,16 @@ A：这个 bug 已修复。根因是代码原先用 `chatModel.chat(String)` 把
 
 **Q：回答不够准确？**
 A：可以调整切块大小（`KnowledgeBase.CHUNK_SIZE`）和检索数量（`KnowledgeBase.DEFAULT_TOP_K`），增大 topK 可以让更多相关片段进入上下文。
+
+**Q：上传文件后提问报错"Bad control character in string literal in JSON"？**
+A：这个 bug 已修复。根因是 PDF/文本解析出的内容含有 `\n`、`\r`、`\t` 等控制字符，而旧的手写 `escapeJson()` 方法转义顺序有 bug（`\\` 替换在 `\n` 之前，导致后续 `\n`、`\r`、`\t` 匹配失效），且 `extractJsonField()` 用字符串截取解析 JSON，遇到换行符中的 `"` 会错误截断。修复方案：
+1. **pom.xml** 新增 Gson 2.11.0 依赖。
+2. **后端** `handleAsk` / `handleUpload` 改用 `JsonParser.parseString()` 标准解析；响应用 `gson.toJson(Map)` 序列化，Gson 自动正确转义所有控制字符。
+3. **前端** 上传请求体用 `JSON.stringify()` 构造（JS 会自动转义换行等字符）。
+4. 删除了所有手写的 `escapeJson`、`extractJsonField`、`buildJsonResponse` 方法。
+
+**Q：Web 界面拖拽上传支持哪些格式？文件多大能解析？**
+A：支持 `.txt`（UTF-8 文本，前端 `FileReader.readAsText` 读取）和 `.pdf`（前端 `readAsDataURL` 读成 base64，后端用 Apache PDFBox 解析）。切块大小默认 500 字符/块，重叠 100 字符，与 `documents/` 建库逻辑完全一致。上传文件不会覆盖预设知识库，移除上传文件后可回退。
 
 **Q：中文输入输出变成乱码（"??"、"鈺斺晲"等）？**
 A：这是 Windows 控制台默认使用 GBK 编码（代码页 936）与程序 UTF-8 输出冲突。
