@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- 控制台输出 -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <!-- 简洁格式：级别 + 消息 -->
+            <pattern>%d{HH:mm:ss.SSS} [%level] %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 降低 LangChain4j 自身的调试日志级别，避免刷屏 -->
+    <logger name="dev.langchain4j" level="WARN" />
+
+    <!-- 程序自己的日志用 INFO 级别 -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+    </root>
+</configuration>

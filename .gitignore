@@ -1,0 +1,26 @@
+# Maven
+target/
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+
+# 密钥文件（严禁提交）
+*.key
+*.pem
+*.p12
+credentials.*
+**/apikey*
+**/api_key*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+logs/
