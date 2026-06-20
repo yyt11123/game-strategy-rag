@@ -75,11 +75,23 @@ public class Main {
         // ==================== 阶段 1/2/Web 公共：构建知识库 ====================
         if (mode.equals("phase1") || mode.equals("phase2") || mode.equals("web")) {
             try {
-                knowledgeBase = new KnowledgeBase();
-                int count = knowledgeBase.build();
-                if (count == 0) {
-                    System.out.println("⚠️ 知识库为空，将只能回答'未找到相关信息'。");
+                knowledgeBase = new KnowledgeBase();  // 构造函数内已尝试从文件加载
+
+                int count;
+                if (KnowledgeBase.isStoreExists()) {
+                    // 已有持久化文件，跳过 documents/ 目录加载，直接复用
+                    System.out.println("📂 加载已有知识库，跳过文档目录加载。");
+                    System.out.println("   如需重新构建，请删除 knowledge-base.db 后重启。\n");
+                    count = -1;  // 表示从文件加载，不计数
+                } else {
+                    // 首次运行，从 documents/ 构建
+                    System.out.println("📚 首次运行，构建知识库...\n");
+                    count = knowledgeBase.build();
+                    if (count == 0) {
+                        System.out.println("⚠️ 知识库为空，将只能回答'未找到相关信息'。");
+                    }
                 }
+
                 ragService = new RagService(knowledgeBase);
             } catch (Exception e) {
                 System.err.println("❌ 知识库构建失败：");

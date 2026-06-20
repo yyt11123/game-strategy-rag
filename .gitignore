@@ -21,6 +21,9 @@ credentials.*
 .DS_Store
 Thumbs.db
 
+# 向量库持久化文件
+knowledge-base.db
+
 # 日志
 *.log
 logs/

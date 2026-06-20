@@ -45,6 +45,9 @@ public class KnowledgeBase {
     /** 攻略文档存放目录 */
     private static final String DOCUMENTS_DIR = "documents";
 
+    /** 向量库持久化文件路径 */
+    public static final Path STORE_PATH = Paths.get("knowledge-base.db");
+
     /** 切块大小（字符数），可调整以优化检索效果 */
     public static final int CHUNK_SIZE = 500;
 
@@ -59,8 +62,8 @@ public class KnowledgeBase {
 
     // ==================== 内部状态 ====================
 
-    /** 内存向量库：所有攻略片段的向量都存在这里，程序重启后需要重建 */
-    private final InMemoryEmbeddingStore<TextSegment> embeddingStore;
+    /** 内存向量库：支持持久化到 knowledge-base.db，重启后可复用 */
+    private InMemoryEmbeddingStore<TextSegment> embeddingStore;
 
     /** 向量化模型（text-embedding-v4，远程 API） */
     private final EmbeddingModel embeddingModel;
@@ -72,19 +75,36 @@ public class KnowledgeBase {
     private boolean built = false;
 
     /**
-     * 初始化知识库。
-     * 注意：这里只是创建实例，不会立即构建知识库。
-     * 需要调用 build() 来实际加载文档、向量化和入库。
+     * 初始化知识库（支持持久化）。
+     * 如果 knowledge-base.db 已存在，从文件反序列化加载，跳过重复向量化。
+     * 如果不存在，创建新的空向量库，后续 build() 或 addDocument() 会填充并持久化。
      */
     public KnowledgeBase() {
         this.embeddingModel = ModelConfig.getEmbeddingModel();
-        this.embeddingStore = new InMemoryEmbeddingStore<>();
 
         // 创建切块器：按最大500字符递归切分，相邻块重叠100字符
         this.splitter = DocumentSplitters.recursive(
                 CHUNK_SIZE,
                 CHUNK_OVERLAP
         );
+
+        // 尝试从持久化文件加载已有向量库
+        if (Files.exists(STORE_PATH)) {
+            try {
+                System.out.println("📂 检测到已有知识库文件，加载中...");
+                this.embeddingStore = InMemoryEmbeddingStore.fromFile(STORE_PATH);
+                this.built = true;
+                System.out.println("✅ 知识库加载完成！共 " + embeddingStore.size() + " 条记录。\n");
+            } catch (RuntimeException e) {
+                System.err.println("⚠️ 知识库文件损坏或格式不兼容，创建新库。" + e.getMessage());
+                this.embeddingStore = new InMemoryEmbeddingStore<>();
+                this.built = false;
+            }
+        } else {
+            System.out.println("🆕 未找到知识库文件，创建新库。");
+            this.embeddingStore = new InMemoryEmbeddingStore<>();
+            this.built = false;
+        }
     }
 
     /**
@@ -160,7 +180,10 @@ public class KnowledgeBase {
 
         built = true;
         System.out.printf("   ③④ 向量化 + 入库完成（成功 %d 条，失败 %d 条）\n", successCount, failCount);
-        System.out.println("✅ 知识库构建完成！共 " + successCount + " 条记录可供检索。\n");
+        System.out.println("✅ 知识库构建完成！共 " + successCount + " 条记录可供检索。");
+
+        // 持久化到文件，下次启动直接加载
+        saveStore();
         return successCount;
     }
 
@@ -218,6 +241,9 @@ public class KnowledgeBase {
         }
 
         System.out.printf("   ✅ 动态入库完成（成功 %d 条，失败 %d 条）\n", successCount, failCount);
+
+        // 增量持久化
+        saveStore();
         return successCount;
     }
 
@@ -271,6 +297,36 @@ public class KnowledgeBase {
      */
     public boolean isEmpty() {
         return !built || embeddingStore == null;
+    }
+
+    /**
+     * 将向量库序列化到文件，供下次启动复用。
+     */
+    private void saveStore() {
+        try {
+            embeddingStore.serializeToFile(STORE_PATH);
+            System.out.printf("💾 向量库已持久化（%d 条记录）→ %s\n",
+                    embeddingStore.size(), STORE_PATH.toAbsolutePath());
+        } catch (Exception e) {
+            System.err.println("⚠️ 向量库持久化失败：" + e.getMessage() + "，重启将丢失本次入库内容。");
+        }
+    }
+
+    /**
+     * 判断持久化文件是否已存在。
+     */
+    public static boolean isStoreExists() {
+        return Files.exists(STORE_PATH);
+    }
+
+    /**
+     * 重置知识库：删除持久化文件并重新创建空向量库。
+     */
+    public void clearStore() throws IOException {
+        Files.deleteIfExists(STORE_PATH);
+        this.embeddingStore = new InMemoryEmbeddingStore<>();
+        this.built = false;
+        System.out.println("🗑️ 知识库已重置。");
     }
 
     // ==================== 内部辅助方法 ====================
