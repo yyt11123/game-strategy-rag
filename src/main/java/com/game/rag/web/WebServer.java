@@ -3,6 +3,10 @@ package com.game.rag.web;
 import com.game.rag.rag.RagAnswer;
 import com.game.rag.rag.RagService;
 import com.game.rag.rag.SearchResult;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonSyntaxException;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -11,7 +15,10 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 简易 Web 服务：提供一个极简的网页界面用于问答演示。
@@ -37,13 +44,18 @@ public class WebServer {
     /** HTTP 服务器实例 */
     private final HttpServer server;
 
+    /** JSON 序列化/反序列化 */
+    private static final Gson gson = new Gson();
+
     public WebServer(RagService ragService) throws IOException {
         this.ragService = ragService;
+
         this.server = HttpServer.create(new InetSocketAddress(PORT), 0);
 
         // 注册路由
-        server.createContext("/", this::handleIndex);       // 首页
-        server.createContext("/api/ask", this::handleAsk);  // 问答 API
+        server.createContext("/", this::handleIndex);          // 首页
+        server.createContext("/api/ask", this::handleAsk);     // 问答 API
+        server.createContext("/api/upload", this::handleUpload); // 上传文件 API
 
         server.setExecutor(null); // 使用默认的线程池
     }
@@ -86,107 +98,133 @@ public class WebServer {
      * 响应体：JSON 格式的 { answer, sources }
      */
     private void handleAsk(HttpExchange exchange) throws IOException {
-        // 只接受 POST 请求
         if (!"POST".equals(exchange.getRequestMethod())) {
-            sendResponse(exchange, 405, "application/json",
-                    "{\"error\":\"只支持POST请求\"}");
+            respondJson(exchange, 405, Map.of("error", "只支持POST请求"));
             return;
         }
 
-        // 读取请求体
         String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        String question;
 
-        // 解析 question 参数（简单 form-urlencoded 解析）
-        String question = parseQuestion(body);
+        // 尝试 JSON 解析；失败则回退 form-urlencoded
+        try {
+            JsonObject json = JsonParser.parseString(body).getAsJsonObject();
+            question = json.has("question") ? json.get("question").getAsString() : null;
+        } catch (JsonSyntaxException e) {
+            question = parseUrlEncodedField(body, "question");
+        }
+
         if (question == null || question.isBlank()) {
-            sendResponse(exchange, 400, "application/json",
-                    "{\"error\":\"问题不能为空\"}");
+            respondJson(exchange, 400, Map.of("error", "问题不能为空"));
             return;
         }
 
-        // 调用 RAG 服务
         try {
             RagAnswer answer = ragService.ask(question);
-            String json = buildJsonResponse(answer);
-            sendResponse(exchange, 200, "application/json; charset=utf-8", json);
+            respondJson(exchange, 200, answerToMap(answer));
         } catch (Exception e) {
-            String errorJson = "{\"error\":\"处理请求时出错：" + escapeJson(e.getMessage()) + "\"}";
-            sendResponse(exchange, 500, "application/json", errorJson);
+            respondJson(exchange, 500, Map.of("error",
+                    "处理请求时出错：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 上传文件 API：POST /api/upload，接收 JSON { fileName, content, type }.
+     * txt 文件：content 为 UTF-8 文本；pdf 文件：content 为 base64 编码。
+     * 调用 KnowledgeBase.addDocument() 进行切块 / 向量化 / 入库。
+     */
+    private void handleUpload(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            respondJson(exchange, 405, Map.of("error", "只支持POST请求"));
+            return;
+        }
+
+        String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        try {
+            JsonObject json = JsonParser.parseString(body).getAsJsonObject();
+            String fileName = json.has("fileName") ? json.get("fileName").getAsString() : null;
+            String content  = json.has("content")  ? json.get("content").getAsString()  : null;
+            String type     = json.has("type")     ? json.get("type").getAsString()     : null;
+
+            if (fileName == null || fileName.isBlank()
+                    || content == null || content.isBlank()
+                    || type == null || type.isBlank()) {
+                respondJson(exchange, 400, Map.of("error", "缺少必要字段：fileName / content / type"));
+                return;
+            }
+
+            if (!type.equalsIgnoreCase("txt") && !type.equalsIgnoreCase("pdf")) {
+                respondJson(exchange, 400, Map.of("error", "仅支持 txt 和 pdf 文件类型"));
+                return;
+            }
+
+            int count = ragService.addDocument(fileName, content, type);
+            respondJson(exchange, 200, Map.of(
+                    "ok", true,
+                    "message", "文件已解析入库",
+                    "chunks", (Object) count));
+        } catch (JsonSyntaxException e) {
+            respondJson(exchange, 400, Map.of("error", "JSON 格式错误：" + e.getMessage()));
+        } catch (Exception e) {
+            respondJson(exchange, 500, Map.of("error", "文件处理失败：" + e.getMessage()));
         }
     }
 
     // ==================== 辅助方法 ====================
 
     /**
-     * 从 form-urlencoded 请求体中解析 question 参数。
+     * 用 Gson 将 Map 序列化为 JSON 并发送响应。
+     * Gson 自动转义换行、引号等特殊字符，杜绝手动拼接导致的 JSON 语法错误。
      */
-    private String parseQuestion(String body) {
-        // 简单处理：question=xxx 或直接是纯文本
-        if (body.startsWith("question=")) {
-            String value = body.substring("question=".length());
-            return URLDecoder.decode(value, StandardCharsets.UTF_8);
-        }
-        // 也支持 JSON 格式：{"question":"xxx"}
-        if (body.contains("\"question\"")) {
-            int start = body.indexOf("\"question\"");
-            int colon = body.indexOf(":", start);
-            int valStart = body.indexOf("\"", colon + 1);
-            int valEnd = body.indexOf("\"", valStart + 1);
-            if (valStart > 0 && valEnd > valStart) {
-                return body.substring(valStart + 1, valEnd);
-            }
-        }
-        return body.trim();
+    private static void respondJson(HttpExchange exchange, int statusCode, Map<String, Object> data)
+            throws IOException {
+        String json = gson.toJson(data);
+        sendResponse(exchange, statusCode, "application/json; charset=utf-8", json);
     }
 
     /**
-     * 构建 JSON 响应。
+     * 将 RagAnswer 转为可序列化的 Map（供 Gson 输出）。
      */
-    private String buildJsonResponse(RagAnswer answer) {
-        StringBuilder json = new StringBuilder();
-        json.append("{\n");
-        json.append("  \"answer\": \"").append(escapeJson(answer.answer())).append("\",\n");
-        json.append("  \"sources\": [\n");
+    private static Map<String, Object> answerToMap(RagAnswer answer) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("answer", answer.answer());
 
         List<SearchResult> sources = answer.sources();
-        for (int i = 0; i < sources.size(); i++) {
-            SearchResult src = sources.get(i);
-            if (i > 0) json.append(",\n");
-            json.append("    {\n");
-            json.append("      \"fileName\": \"").append(
-                    escapeJson(src.fileName() != null ? src.fileName() : "未知")).append("\",\n");
-            json.append("      \"score\": ").append(String.format("%.4f", src.score())).append(",\n");
-
-            // 片段内容（截取前 300 字符展示）
+        List<Map<String, Object>> srcMaps = new ArrayList<>();
+        for (SearchResult src : sources) {
+            Map<String, Object> sm = new LinkedHashMap<>();
+            sm.put("fileName", src.fileName() != null ? src.fileName() : "未知");
+            sm.put("score", src.score());
             String snippet = src.content();
             if (snippet.length() > 300) {
                 snippet = snippet.substring(0, 300) + "...";
             }
-            json.append("      \"snippet\": \"").append(escapeJson(snippet)).append("\"\n");
-            json.append("    }");
+            sm.put("snippet", snippet);
+            srcMaps.add(sm);
         }
-
-        json.append("\n  ]\n");
-        json.append("}");
-        return json.toString();
+        map.put("sources", srcMaps);
+        return map;
     }
 
     /**
-     * 对 JSON 字符串中的特殊字符进行转义。
+     * 从 form-urlencoded 体中提取单个字段（回退方案）。
      */
-    private String escapeJson(String s) {
-        if (s == null) return "";
-        return s.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
+    private static String parseUrlEncodedField(String body, String key) {
+        String prefix = key + "=";
+        if (body.startsWith(prefix)) {
+            return URLDecoder.decode(body.substring(prefix.length()), StandardCharsets.UTF_8);
+        }
+        int idx = body.indexOf("&" + prefix);
+        if (idx >= 0) {
+            return URLDecoder.decode(body.substring(idx + 1 + prefix.length()), StandardCharsets.UTF_8);
+        }
+        return null;
     }
 
     /**
      * 统一发送 HTTP 响应。
      */
-    private void sendResponse(HttpExchange exchange, int statusCode, String contentType, String body)
+    private static void sendResponse(HttpExchange exchange, int statusCode, String contentType, String body)
             throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", contentType);
@@ -208,11 +246,12 @@ public class WebServer {
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>攻略小帮手 · 游戏攻略智能问答</title>
+                <title>Mochi · 游戏攻略智能问答</title>
                 <style>
                     :root {
                         --bg:         #1A1A1A;
                         --bg-card:    #262626;
+                        --bg-overlay: rgba(0,0,0,0.78);
                         --text:       #ECECEC;
                         --text-muted: #9B9B9B;
                         --text-faint: #6E6E6E;
@@ -245,7 +284,7 @@ public class WebServer {
 
                     .header {
                         text-align: center;
-                        padding: 48px 20px 32px;
+                        padding: 48px 20px 28px;
                     }
 
                     .header .logo {
@@ -253,14 +292,6 @@ public class WebServer {
                         font-weight: 700;
                         color: var(--text);
                         letter-spacing: -0.3px;
-                        margin-bottom: 6px;
-                    }
-                    .header .logo .accent { color: var(--accent); }
-
-                    .header .subtitle {
-                        font-size: 14px;
-                        color: var(--text-muted);
-                        font-weight: 400;
                     }
 
                     .main {
@@ -268,10 +299,10 @@ public class WebServer {
                         width: 100%;
                         max-width: var(--max-w);
                         margin: 0 auto;
-                        padding: 0 20px 120px;  /* 120px bottom for fixed input */
+                        padding: 0 20px 120px;
                     }
 
-                    /* ── Welcome / Empty state ── */
+                    /* ── Welcome ── */
                     .welcome {
                         display: flex;
                         flex-direction: column;
@@ -300,12 +331,76 @@ public class WebServer {
                         letter-spacing: -0.2px;
                     }
 
+                    /* ── File card (above messages, below input bar) ── */
+                    .file-card-wrap {
+                        position: fixed;
+                        bottom: 80px;
+                        left: 0; right: 0;
+                        display: flex;
+                        justify-content: center;
+                        z-index: 99;
+                        pointer-events: none;
+                    }
+                    .file-card {
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        padding: 8px 14px;
+                        background: var(--bg-card);
+                        border: 1px solid var(--border);
+                        border-radius: var(--radius-sm);
+                        font-size: 13px;
+                        color: var(--text-muted);
+                        box-shadow: var(--shadow);
+                        pointer-events: all;
+                        max-width: var(--max-w);
+                    }
+                    .file-card .file-icon { font-size: 16px; }
+                    .file-card .file-name {
+                        font-weight: 500;
+                        color: var(--text);
+                        max-width: 260px;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        white-space: nowrap;
+                    }
+                    .file-card .file-status { color: var(--text-faint); white-space: nowrap; }
+                    .file-card .file-remove {
+                        background: none; border: none;
+                        color: var(--text-faint); cursor: pointer;
+                        font-size: 16px; padding: 0 2px;
+                        transition: color 0.15s;
+                    }
+                    .file-card .file-remove:hover { color: var(--accent); }
+
+                    /* ── Drag-overlay ── */
+                    .drag-overlay {
+                        display: none;
+                        position: fixed;
+                        inset: 0;
+                        background: var(--bg-overlay);
+                        z-index: 200;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .drag-overlay.active { display: flex; }
+                    .drag-overlay .drop-zone {
+                        padding: 48px 64px;
+                        border: 2px dashed var(--accent);
+                        border-radius: var(--radius);
+                        text-align: center;
+                        color: var(--text);
+                        background: rgba(38,38,38,0.70);
+                    }
+                    .drag-overlay .drop-zone .drop-icon { font-size: 36px; margin-bottom: 12px; color: var(--accent); }
+                    .drag-overlay .drop-zone .drop-text { font-size: 16px; }
+                    .drag-overlay .drop-zone .drop-ext  { font-size: 12px; color: var(--text-faint); margin-top: 6px; }
+
                     /* ── Conversation ── */
                     .conv-item {
                         margin-bottom: 32px;
                     }
 
-                    /* User message — right-aligned feel via a subtle warm left stripe */
                     .user-msg {
                         display: flex;
                         align-items: flex-start;
@@ -334,7 +429,6 @@ public class WebServer {
                         background: transparent;
                     }
 
-                    /* AI answer */
                     .ai-msg {
                         padding: 20px 0 0 0;
                     }
@@ -344,7 +438,6 @@ public class WebServer {
                         color: var(--text);
                     }
 
-                    /* Markdown-rendered content inside AI answer */
                     .ai-msg .content h3 { font-size: 17px; font-weight: 600; margin: 20px 0 8px; color: var(--text); }
                     .ai-msg .content h4 { font-size: 15px; font-weight: 600; margin: 16px 0 6px; color: var(--text); }
                     .ai-msg .content p  { margin: 0 0 10px; }
@@ -353,7 +446,7 @@ public class WebServer {
                     .ai-msg .content strong { font-weight: 600; color: var(--text); }
                     .ai-msg .content em { font-style: italic; color: var(--text-muted); }
 
-                    /* ── Sources (collapsible) ── */
+                    /* ── Sources ── */
                     .sources {
                         margin-top: 18px;
                     }
@@ -377,9 +470,7 @@ public class WebServer {
                         margin-right: 4px;
                         transition: transform 0.15s;
                     }
-                    .sources[open] summary::before {
-                        transform: rotate(90deg);
-                    }
+                    .sources[open] summary::before { transform: rotate(90deg); }
                     .sources .src-list {
                         margin-top: 10px;
                         display: flex;
@@ -418,11 +509,9 @@ public class WebServer {
                     .sources .src-item .src-snippet {
                         color: var(--text-faint);
                         font-style: italic;
-                        overflow: hidden;
-                        text-overflow: ellipsis;
                     }
 
-                    /* ── Error ── */
+                    /* ── Error / Toast ── */
                     .error-msg {
                         padding: 14px 18px;
                         background: #261A18;
@@ -432,6 +521,23 @@ public class WebServer {
                         font-size: 14px;
                         line-height: 1.5;
                     }
+                    .toast {
+                        position: fixed;
+                        bottom: 100px;
+                        left: 50%;
+                        transform: translateX(-50%);
+                        padding: 10px 22px;
+                        background: #2C221C;
+                        border: 1px solid var(--accent);
+                        border-radius: 20px;
+                        color: var(--accent);
+                        font-size: 13px;
+                        z-index: 300;
+                        opacity: 0;
+                        transition: opacity 0.25s;
+                        pointer-events: none;
+                    }
+                    .toast.show { opacity: 1; }
 
                     /* ── Loading dots ── */
                     .loading-dots {
@@ -455,7 +561,7 @@ public class WebServer {
                         30%           { opacity: 1.0; transform: translateY(-6px); }
                     }
 
-                    /* ── Input bar (fixed bottom) ── */
+                    /* ── Input bar ── */
                     .input-bar-wrap {
                         position: fixed;
                         bottom: 0;
@@ -463,7 +569,9 @@ public class WebServer {
                         background: linear-gradient(to top, var(--bg) 80%, transparent);
                         padding: 10px 20px 24px;
                         display: flex;
-                        justify-content: center;
+                        flex-direction: column;
+                        align-items: center;
+                        gap: 0;
                         z-index: 100;
                     }
                     .input-bar {
@@ -485,9 +593,7 @@ public class WebServer {
                         box-shadow: var(--shadow);
                         transition: border-color 0.18s ease;
                     }
-                    .input-bar input::placeholder {
-                        color: var(--text-faint);
-                    }
+                    .input-bar input::placeholder { color: var(--text-faint); }
                     .input-bar input:focus {
                         border-color: var(--accent);
                         box-shadow: 0 1px 8px rgba(217,119,87,0.10);
@@ -506,12 +612,8 @@ public class WebServer {
                         transition: background 0.18s ease, transform 0.10s ease;
                         white-space: nowrap;
                     }
-                    .input-bar button:hover {
-                        background: var(--accent-hover);
-                    }
-                    .input-bar button:active {
-                        transform: scale(0.97);
-                    }
+                    .input-bar button:hover { background: var(--accent-hover); }
+                    .input-bar button:active { transform: scale(0.97); }
                     .input-bar button:disabled {
                         background: #3A3A3A;
                         color: #777;
@@ -519,24 +621,16 @@ public class WebServer {
                         transform: none;
                     }
 
-                    /* ── Divider between Q&A rounds ── */
-                    .conv-divider {
-                        border: none;
-                        border-top: 1px solid var(--border);
-                        margin: 8px 0 28px;
-                        opacity: 0.5;
-                    }
-
                     /* ── Responsive ── */
                     @media (max-width: 600px) {
                         .header { padding: 36px 16px 24px; }
                         .header .logo { font-size: 22px; }
-                        .header .subtitle { font-size: 13px; }
                         .main { padding: 0 14px 110px; }
                         .input-bar-wrap { padding: 8px 14px 18px; }
                         .input-bar input { padding: 11px 14px; font-size: 14px; }
                         .input-bar button { padding: 11px 18px; font-size: 14px; }
                         .ai-msg .content h3 { font-size: 16px; }
+                        .drag-overlay .drop-zone { padding: 32px 40px; }
                     }
                 </style>
             </head>
@@ -549,6 +643,18 @@ public class WebServer {
                 <div class="logo">Mochi</div>
             </div>
 
+            <!-- ── Drag overlay ── -->
+            <div class="drag-overlay" id="dragOverlay">
+                <div class="drop-zone">
+                    <div class="drop-icon">⬆</div>
+                    <div class="drop-text">松开以添加文件</div>
+                    <div class="drop-ext">支持 .txt 和 .pdf</div>
+                </div>
+            </div>
+
+            <!-- ── Toast ── -->
+            <div class="toast" id="toast"></div>
+
             <!-- ── Conversation area ── -->
             <div class="main" id="chatArea">
                 <div class="welcome" id="welcomeBox">
@@ -559,11 +665,21 @@ public class WebServer {
                 </div>
             </div>
 
+            <!-- ── Uploaded file card ── -->
+            <div class="file-card-wrap" id="fileCardWrap" style="display:none;">
+                <div class="file-card" id="fileCard">
+                    <span class="file-icon">📄</span>
+                    <span class="file-name" id="fileNameSpan"></span>
+                    <span class="file-status" id="fileStatus"></span>
+                    <button class="file-remove" id="fileRemoveBtn" title="移除文件">✕</button>
+                </div>
+            </div>
+
             <!-- ── Fixed input bar ── -->
             <div class="input-bar-wrap">
                 <div class="input-bar">
                     <input type="text" id="questionInput"
-                           placeholder="输入你的问题…"
+                           placeholder="输入你的问题，或拖入文件开始…"
                            onkeydown="if(event.key==='Enter') askQuestion()"
                            autocomplete="off">
                     <button id="askButton" onclick="askQuestion()">发送</button>
@@ -573,35 +689,138 @@ public class WebServer {
             </div><!-- /page -->
 
             <script>
+                /* ── Globals ── */
+                var uploadedFileName = null;
+
                 /* ── Time-based greeting ── */
-                (function setGreeting() {
-                    var hour = new Date().getHours();
-                    var text;
-                    if (hour >= 5 && hour < 12)        text = 'Good morning';
-                    else if (hour >= 12 && hour < 18)  text = 'Good afternoon';
-                    else                               text = 'Good evening';
-                    document.getElementById('greetingText').textContent = text;
+                (function(){
+                    var h = new Date().getHours();
+                    var t = h >= 5 && h < 12 ? 'Good morning'
+                          : h >= 12 && h < 18 ? 'Good afternoon'
+                          : 'Good evening';
+                    document.getElementById('greetingText').textContent = t;
                 })();
+
+                /* ── Toast ── */
+                function showToast(msg, ms) {
+                    var el = document.getElementById('toast');
+                    el.textContent = msg;
+                    el.classList.add('show');
+                    clearTimeout(el._tid);
+                    el._tid = setTimeout(function(){ el.classList.remove('show'); }, ms || 2500);
+                }
+
+                /* ── File card visibility ── */
+                function showFileCard(name, status) {
+                    document.getElementById('fileNameSpan').textContent = name;
+                    document.getElementById('fileStatus').textContent = status || '';
+                    document.getElementById('fileCardWrap').style.display = 'flex';
+                }
+                function hideFileCard() {
+                    document.getElementById('fileCardWrap').style.display = 'none';
+                }
+
+                /* ── Upload file to server ── */
+                async function uploadFile(fileName, content, type) {
+                    showFileCard(fileName, '正在解析…');
+                    var resp = await fetch('/api/upload', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                        body: JSON.stringify({ fileName: fileName, content: content, type: type })
+                    });
+                    var data = await resp.json();
+                    if (!resp.ok || data.error) {
+                        showToast(data.error || '上传失败', 3000);
+                        hideFileCard();
+                        return false;
+                    }
+                    uploadedFileName = fileName;
+                    document.getElementById('fileStatus').textContent = '已就绪，可开始提问';
+                    showToast('文件已就绪（' + data.chunks + ' 个片段），可以开始提问', 3000);
+                    return true;
+                }
+
+                /* ── Drag & drop ── */
+                var dragOverlay = document.getElementById('dragOverlay');
+                var dragCounter = 0;
+
+                function handleDragEnter(e) {
+                    e.preventDefault(); e.stopPropagation();
+                    dragCounter++;
+                    dragOverlay.classList.add('active');
+                }
+                function handleDragLeave(e) {
+                    e.preventDefault(); e.stopPropagation();
+                    dragCounter--;
+                    if (dragCounter <= 0) { dragCounter = 0; dragOverlay.classList.remove('active'); }
+                }
+                function handleDragOver(e) {
+                    e.preventDefault(); e.stopPropagation();
+                }
+
+                async function handleDrop(e) {
+                    e.preventDefault(); e.stopPropagation();
+                    dragCounter = 0;
+                    dragOverlay.classList.remove('active');
+
+                    var file = (e.dataTransfer.files && e.dataTransfer.files[0]);
+                    if (!file) return;
+
+                    var name = file.name;
+                    var ext = name.split('.').pop().toLowerCase();
+
+                    if (ext !== 'txt' && ext !== 'pdf') {
+                        showToast('仅支持 .txt 和 .pdf 文件', 3000);
+                        return;
+                    }
+
+                    if (ext === 'txt') {
+                        var reader = new FileReader();
+                        reader.onload = function(ev) {
+                            uploadFile(name, ev.target.result, 'txt');
+                        };
+                        reader.onerror = function() { showToast('读取文件失败', 3000); };
+                        reader.readAsText(file, 'UTF-8');
+                    } else {
+                        // pdf: 前端读成 base64，后端解析
+                        showFileCard(name, '正在读取…');
+                        var reader = new FileReader();
+                        reader.onload = function(ev) {
+                            var b64 = ev.target.result.split(',')[1]; // strip "data:...;base64,"
+                            uploadFile(name, b64, 'pdf');
+                        };
+                        reader.onerror = function() { showToast('读取文件失败', 3000); hideFileCard(); };
+                        reader.readAsDataURL(file);
+                    }
+                }
+
+                document.addEventListener('dragenter', handleDragEnter);
+                document.addEventListener('dragleave', handleDragLeave);
+                document.addEventListener('dragover', handleDragOver);
+                document.addEventListener('drop', handleDrop);
+
+                // Remove file button
+                document.getElementById('fileRemoveBtn').addEventListener('click', function(){
+                    uploadedFileName = null;
+                    hideFileCard();
+                });
 
                 /* ── Send question ── */
                 async function askQuestion() {
-                    const input = document.getElementById('questionInput');
-                    const button = document.getElementById('askButton');
-                    const chatArea = document.getElementById('chatArea');
-                    const question = input.value.trim();
+                    var input = document.getElementById('questionInput');
+                    var button = document.getElementById('askButton');
+                    var chatArea = document.getElementById('chatArea');
+                    var question = input.value.trim();
                     if (!question) return;
 
-                    // Disable input
                     input.disabled = true;
                     button.disabled = true;
                     button.textContent = '...';
 
-                    // Remove welcome box
-                    const welcome = document.getElementById('welcomeBox');
+                    var welcome = document.getElementById('welcomeBox');
                     if (welcome) welcome.remove();
 
-                    // Append: user message + loading dots
-                    const conv = document.createElement('div');
+                    var conv = document.createElement('div');
                     conv.className = 'conv-item';
                     conv.innerHTML =
                         '<div class="user-msg">' +
@@ -614,42 +833,37 @@ public class WebServer {
                             '</div>' +
                         '</div>';
                     chatArea.appendChild(conv);
-
-                    // Scroll to bottom
                     window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
 
                     try {
-                        const resp = await fetch('/api/ask', {
+                        var resp = await fetch('/api/ask', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                             body: 'question=' + encodeURIComponent(question)
                         });
-                        const data = await resp.json();
+                        var data = await resp.json();
 
-                        // Remove loading dots, render answer
-                        const aiMsg = conv.querySelector('.ai-msg');
+                        var aiMsg = conv.querySelector('.ai-msg');
                         aiMsg.innerHTML = '';
 
                         if (data.error) {
                             aiMsg.innerHTML = '<div class="error-msg">' + escapeHtml(data.error) + '</div>';
                         } else {
-                            // Render answer with simple Markdown
-                            const contentDiv = document.createElement('div');
+                            var contentDiv = document.createElement('div');
                             contentDiv.className = 'content';
                             contentDiv.innerHTML = renderMarkdown(data.answer);
                             aiMsg.appendChild(contentDiv);
 
-                            // Sources (collapsible)
                             if (data.sources && data.sources.length > 0) {
-                                const details = document.createElement('details');
+                                var details = document.createElement('details');
                                 details.className = 'sources';
-                                const summary = document.createElement('summary');
+                                var summary = document.createElement('summary');
                                 summary.textContent = '参考来源 (' + data.sources.length + ')';
                                 details.appendChild(summary);
 
-                                const list = document.createElement('div');
+                                var list = document.createElement('div');
                                 list.className = 'src-list';
-                                data.sources.forEach((src, i) => {
+                                data.sources.forEach(function(src, i) {
                                     list.innerHTML +=
                                         '<div class="src-item">' +
                                             '<div class="src-meta">' +
@@ -665,11 +879,10 @@ public class WebServer {
                             }
                         }
                     } catch (err) {
-                        const aiMsg = conv.querySelector('.ai-msg');
-                        aiMsg.innerHTML = '<div class="error-msg">请求失败：' + escapeHtml(err.message) + '</div>';
+                        var aiMsg2 = conv.querySelector('.ai-msg');
+                        aiMsg2.innerHTML = '<div class="error-msg">请求失败：' + escapeHtml(err.message) + '</div>';
                     }
 
-                    // Restore input
                     input.disabled = false;
                     button.disabled = false;
                     button.textContent = '发送';
@@ -678,80 +891,45 @@ public class WebServer {
                     window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
                 }
 
-                /* ── Simple Markdown → HTML ── */
+                /* ── Markdown → HTML ── */
                 function renderMarkdown(text) {
                     if (!text) return '';
-
-                    // Escape HTML first
                     var lines = text.split('\\n');
                     var html = '';
-                    var inList = false;
-                    var listType = '';
-
+                    var inList = false, listType = '';
                     for (var i = 0; i < lines.length; i++) {
                         var line = lines[i];
-
-                        // Blank line: close list, insert paragraph break
                         if (line.trim() === '') {
-                            if (inList) {
-                                html += listType === 'ul' ? '</ul>' : '</ol>';
-                                inList = false;
-                                listType = '';
-                            }
+                            if (inList) { html += listType === 'ul' ? '</ul>' : '</ol>'; inList = false; listType = ''; }
                             continue;
                         }
-
-                        // Heading: ### or ##
                         var hMatch = line.match(/^(#{2,3})\\s+(.+)$/);
                         if (hMatch) {
                             if (inList) { html += listType === 'ul' ? '</ul>' : '</ol>'; inList = false; listType = ''; }
-                            var level = hMatch[1].length;
-                            html += '<h' + level + '>' + inlineMarkdown(hMatch[2]) + '</h' + level + '>';
+                            html += '<h' + hMatch[1].length + '>' + inlineMarkdown(hMatch[2]) + '</h' + hMatch[1].length + '>';
                             continue;
                         }
-
-                        // Unordered list: - item or * item
                         var ulMatch = line.match(/^[\\-\\*]\\s+(.+)$/);
                         if (ulMatch) {
-                            if (!inList || listType !== 'ul') {
-                                if (inList) html += (listType === 'ul' ? '</ul>' : '</ol>');
-                                html += '<ul>';
-                                inList = true; listType = 'ul';
-                            }
+                            if (!inList || listType !== 'ul') { if (inList) html += listType === 'ul' ? '</ul>' : '</ol>'; html += '<ul>'; inList = true; listType = 'ul'; }
                             html += '<li>' + inlineMarkdown(ulMatch[1]) + '</li>';
                             continue;
                         }
-
-                        // Ordered list: 1. item
                         var olMatch = line.match(/^\\d+\\.\\s+(.+)$/);
                         if (olMatch) {
-                            if (!inList || listType !== 'ol') {
-                                if (inList) html += (listType === 'ul' ? '</ul>' : '</ol>');
-                                html += '<ol>';
-                                inList = true; listType = 'ol';
-                            }
+                            if (!inList || listType !== 'ol') { if (inList) html += listType === 'ul' ? '</ul>' : '</ol>'; html += '<ol>'; inList = true; listType = 'ol'; }
                             html += '<li>' + inlineMarkdown(olMatch[1]) + '</li>';
                             continue;
                         }
-
-                        // Regular paragraph line
                         if (inList) { html += listType === 'ul' ? '</ul>' : '</ol>'; inList = false; listType = ''; }
                         html += '<p>' + inlineMarkdown(line) + '</p>';
                     }
-
                     if (inList) { html += listType === 'ul' ? '</ul>' : '</ol>'; }
-
                     return html;
                 }
-
-                /* ── Inline formatting: **bold**, *italic* ── */
                 function inlineMarkdown(text) {
-                    return text
-                        .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
-                        .replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+                    return text.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>').replace(/\\*(.+?)\\*/g, '<em>$1</em>');
                 }
-
-                /* ── HTML escape ── */
                 function escapeHtml(text) {
                     var div = document.createElement('div');
                     div.textContent = text;

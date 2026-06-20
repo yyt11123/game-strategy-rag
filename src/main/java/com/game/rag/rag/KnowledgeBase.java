@@ -12,12 +12,14 @@ import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
 
+import java.io.ByteArrayInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -159,6 +161,63 @@ public class KnowledgeBase {
         built = true;
         System.out.printf("   ③④ 向量化 + 入库完成（成功 %d 条，失败 %d 条）\n", successCount, failCount);
         System.out.println("✅ 知识库构建完成！共 " + successCount + " 条记录可供检索。\n");
+        return successCount;
+    }
+
+    /**
+     * 动态添加文档：从上传的文件内容创建 Document，切块、向量化、入库。
+     * 支持 txt（纯文本）和 pdf（base64 编码）两种格式。
+     *
+     * @param fileName 上传的文件名（用于来源标注）
+     * @param content  文件内容：txt 为纯文本；pdf 为 base64 编码的二进制数据
+     * @param type     文件类型："txt" 或 "pdf"
+     * @return 成功入库的文本块数量
+     */
+    public int addDocument(String fileName, String content, String type) throws Exception {
+        if (!built) {
+            throw new IllegalStateException("知识库尚未初始化，请先调用 build()");
+        }
+
+        Document doc;
+        if ("pdf".equalsIgnoreCase(type)) {
+            // PDF：前端传 base64，后端解码后用 PdfBox 解析
+            byte[] pdfBytes = Base64.getDecoder().decode(content);
+            ApachePdfBoxDocumentParser parser = new ApachePdfBoxDocumentParser();
+            doc = parser.parse(new ByteArrayInputStream(pdfBytes));
+        } else {
+            // TXT：直接使用文本内容
+            doc = Document.from(content);
+        }
+
+        doc.metadata().put("file_name", fileName);
+        System.out.println("   📎 动态添加文档：" + fileName);
+
+        // 切块
+        List<TextSegment> segments = splitter.split(doc);
+        for (TextSegment seg : segments) {
+            seg.metadata().put("file_name", fileName);
+        }
+        System.out.println("   ✂️ 切分为 " + segments.size() + " 个文本块");
+
+        // 向量化 + 入库
+        int successCount = 0;
+        int failCount = 0;
+        for (int i = 0; i < segments.size(); i++) {
+            TextSegment seg = segments.get(i);
+            try {
+                Embedding embedding = embeddingModel.embed(seg).content();
+                embeddingStore.add(embedding, seg);
+                successCount++;
+            } catch (Exception e) {
+                failCount++;
+                System.err.printf("   ⚠️ 第 %d 块向量化失败：%s\n", i + 1, e.getMessage());
+                if (failCount > 3) {
+                    System.err.println("   ⚠️ 连续失败过多，可能额度不足或网络异常");
+                }
+            }
+        }
+
+        System.out.printf("   ✅ 动态入库完成（成功 %d 条，失败 %d 条）\n", successCount, failCount);
         return successCount;
     }
 

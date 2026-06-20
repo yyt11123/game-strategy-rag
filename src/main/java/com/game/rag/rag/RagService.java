@@ -97,6 +97,19 @@ public class RagService {
     }
 
     /**
+     * 动态添加文档到知识库（供 Web 拖拽上传使用）。
+     * 委托给 KnowledgeBase.addDocument()。
+     *
+     * @param fileName 文件名（用于来源标注）
+     * @param content  文件内容：txt 为纯文本；pdf 为 base64 字符串
+     * @param type     文件类型："txt" 或 "pdf"
+     * @return 成功入库的文本块数量
+     */
+    public int addDocument(String fileName, String content, String type) throws Exception {
+        return knowledgeBase.addDocument(fileName, content, type);
+    }
+
+    /**
      * 将多条检索结果拼接为编号的参考资料文本。
      * 每条前面标上序号和来源文件名，方便大模型引用，也方便用户核对。
      */
