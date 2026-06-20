@@ -3,6 +3,7 @@
 > 基于 **RAG（检索增强生成）+ 通义千问 qwen-plus** 的智能文档问答系统。
 > 支持自然语言提问，从本地文档或拖拽上传的文件中检索相关内容，生成带来源标注的回答。
 > 提供三种交互模式：**控制台 RAG 问答**、**Agent 智能问答**、**暗色 Claude 风格 Web 界面（支持拖拽上传动态知识库）**。
+> **向量库持久化**：知识库自动保存到 `knowledge-base.db`，重启秒开、不重复向量化、省额度。
 
 ---
 
@@ -248,6 +249,32 @@ mvn exec:java -Dexec.args="web"
 
 ---
 
+### 阶段 4 — 向量库持久化
+
+程序首次启动时，会读取 `documents/` 目录并将所有文档向量化，存入内存向量库，**同时自动保存到项目根目录的 `knowledge-base.db` 文件**。之后每次重启，程序会从 `.db` 文件直接加载已有向量库，跳过重复的文档读取和向量化。
+
+**行为说明：**
+- **首次启动**：`documents/` → 读文件 → 切块 → 向量化 → 入库 → 保存 `knowledge-base.db`
+- **再次启动**：检测到 `knowledge-base.db` → 直接加载 → 跳过文档目录 → 秒开，不消耗 Embedding API 额度
+- **拖拽上传**：`addDocument()` 入库后自动增量更新 `knowledge-base.db`
+- **重置知识库**：删除项目根目录的 `knowledge-base.db`，重启即可重新构建
+
+**关键代码：**
+| 类 | 方法 | 作用 |
+|---|---|---|
+| `KnowledgeBase` | 构造函数 | 检测 `STORE_PATH`，存在则 `fromFile()` 加载，不存在则新建 |
+| `KnowledgeBase` | `saveStore()` | `serializeToFile()` 持久化 |
+| `KnowledgeBase` | `isStoreExists()` | 判断 `.db` 文件是否存在 |
+| `KnowledgeBase` | `clearStore()` | 删除 `.db` 并重建空库 |
+| `Main.java` | `main()` | 启动时调用 `isStoreExists()`，存在则跳过 `build()` |
+
+**验收标准：**
+- 首次启动正常构建知识库并生成 `.db` 文件
+- 再次启动从 `.db` 加载，不调 Embedding API，启动速度明显加快
+- 拖拽上传后 `.db` 文件体积增长，重启后上传的内容仍可检索
+
+---
+
 ## 七、额度与联网注意事项
 
 ⚠️ **以下事项非常重要，务必在演示前检查：**
@@ -269,6 +296,7 @@ mvn exec:java -Dexec.args="web"
 ### 节省额度的技巧
 - 测试阶段只用一份较小的文档
 - 切块大小（`CHUNK_SIZE`）调大一点（如 800），减少向量化调用次数
+- 向量库持久化（`knowledge-base.db`）让重启无需重复向量化，是最大的额度节省
 - 演示前先跑一遍确保能用，避免现场翻车
 
 ---
@@ -282,6 +310,7 @@ game-strategy-rag/
 ├── .gitignore                        # Git 忽略规则
 ├── .vscode/
 │   └── launch.json                   # VS Code 启动配置（4 个 Phase）
+├── knowledge-base.db                 # 向量库持久化文件（自动生成，已 gitignore）
 ├── documents/                        # 文档资料目录
 │   └── sample.txt                    # 示例文档
 └── src/main/
@@ -333,6 +362,9 @@ A：这个 bug 已修复。根因是 PDF/文本解析出的内容含有 `\n`、`
 2. **后端** `handleAsk` / `handleUpload` 改用 `JsonParser.parseString()` 标准解析；响应用 `gson.toJson(Map)` 序列化，Gson 自动正确转义所有控制字符。
 3. **前端** 上传请求体用 `JSON.stringify()` 构造（JS 会自动转义换行等字符）。
 4. 删除了所有手写的 `escapeJson`、`extractJsonField`、`buildJsonResponse` 方法。
+
+**Q：每次重启都要重新向量化吗？如何跳过？**
+A：不需要。项目已支持向量库持久化。首次启动构建完成后生成 `knowledge-base.db`，之后启动自动从文件加载，**完全跳过 Embedding API 调用**，启动速度从几十秒降到一两秒，且不消耗额度。拖拽上传的新文件也会自动增量保存。如需重建，删除 `knowledge-base.db` 重启即可。
 
 **Q：Web 界面拖拽上传支持哪些格式？文件多大能解析？**
 A：支持 `.txt`（UTF-8 文本，前端 `FileReader.readAsText` 读取）和 `.pdf`（前端 `readAsDataURL` 读成 base64，后端用 Apache PDFBox 解析）。切块大小默认 500 字符/块，重叠 100 字符，与 `documents/` 建库逻辑完全一致。上传文件不会覆盖预设知识库，移除上传文件后可回退。
