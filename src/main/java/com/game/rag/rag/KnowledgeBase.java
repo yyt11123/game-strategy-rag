@@ -104,7 +104,7 @@ public class KnowledgeBase {
         if (!Files.exists(docsPath)) {
             System.out.println("⚠️ 文档目录不存在，将创建空目录。");
             Files.createDirectories(docsPath);
-            System.out.println("   请将游戏攻略文件（.txt 或 .pdf）放入该目录后重启程序。");
+            System.out.println("   请将文档文件（.txt 或 .pdf）放入该目录后重启程序。");
             built = true;
             return 0;
         }
@@ -113,7 +113,7 @@ public class KnowledgeBase {
         List<Document> documents = loadAllDocuments(docsPath);
         if (documents.isEmpty()) {
             System.out.println("⚠️ 未在 documents/ 中找到任何 .txt 或 .pdf 文件。");
-            System.out.println("   请放入攻略文件后重启程序。");
+            System.out.println("   请放入文档文件后重启程序。");
             built = true;
             return 0;
         }

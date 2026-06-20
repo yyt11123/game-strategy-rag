@@ -32,7 +32,7 @@ import java.util.Map;
  * 页面功能：
  * - 输入框：输入问题
  * - 回答区：显示 AI 生成的回答
- * - 来源区：显示答案引用的攻略文件和片段
+ * - 来源区：显示答案引用的文件和片段
  */
 public class WebServer {
 
@@ -296,7 +296,7 @@ public class WebServer {
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Mochi · 游戏攻略智能问答</title>
+                <title>Mochi · 资料分析助手</title>
                 <style>
                     :root {
                         --bg:         #1A1A1A;
@@ -899,13 +899,15 @@ public class WebServer {
 
                 /* ── Send question ── */
                 async function askQuestion() {
-                    var input = document.getElementById('questionInput');
+                    var qInput = document.getElementById('questionInput');
                     var button = document.getElementById('askButton');
                     var chatArea = document.getElementById('chatArea');
-                    var question = input.value.trim();
+                    var question = qInput.value.trim();
                     if (!question) return;
 
-                    input.disabled = true;
+                    // Clear input immediately
+                    qInput.value = '';
+                    qInput.disabled = true;
                     button.disabled = true;
                     button.textContent = '...';
 
@@ -978,13 +980,12 @@ public class WebServer {
                     } catch (err) {
                         var bubble2 = aiRow.querySelector('.msg-bubble');
                         bubble2.innerHTML = '<div class="error-msg">请求失败：' + escapeHtml(err.message) + '</div>';
+                    } finally {
+                        qInput.disabled = false;
+                        button.disabled = false;
+                        button.textContent = '发送';
+                        qInput.focus();
                     }
-
-                    input.disabled = false;
-                    button.disabled = false;
-                    button.textContent = '发送';
-                    input.value = '';
-                    input.focus();
                     window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
                 }
 

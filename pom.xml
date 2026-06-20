@@ -9,8 +9,8 @@
     <version>1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <name>游戏攻略智能问答助手</name>
-    <description>基于RAG的游戏攻略智能问答系统，支持自然语言提问，检索攻略内容并生成带来源的回答</description>
+    <name>资料分析助手</name>
+    <description>基于RAG的智能文档问答系统，支持拖拽上传、检索文档内容并生成带来源的回答（Mochi）</description>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>

@@ -19,12 +19,12 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 游戏攻略智能问答助手 — 主入口。
+ * 资料分析助手（Mochi）— 主入口。
  *
  * 运行模式（通过命令行参数切换）：
  * - 无参数 / "phase0"：只验证 API 连通性
  * - "phase1"：完整 RAG 模式（检索 → 生成 → 带来源的回答）
- * - "phase2"：Agent 模式（大模型自主选择查攻略还是计算）
+ * - "phase2"：Agent 模式（大模型自主选择查文档还是计算）
  *
  * 所有阶段都包含阶段 0 的 API 验证。
  */
@@ -92,7 +92,7 @@ public class Main {
                 System.out.println("🤖 正在初始化 Agent 模式...");
                 try {
                     agent = GameAssistantAgent.create(knowledgeBase);
-                    System.out.println("✅ Agent 初始化完成（已注册：查攻略工具 + 计算工具）\n");
+                    System.out.println("✅ Agent 初始化完成（已注册：查文档工具 + 计算工具）\n");
                 } catch (Exception e) {
                     System.err.println("⚠️ Agent 初始化失败，回退到普通 RAG 模式：" + e.getMessage());
                     mode = "phase1";
@@ -178,7 +178,7 @@ public class Main {
         System.out.println();
         System.out.println("╔══════════════════════════════════════════════╗");
         System.out.println("║  阶段 1：RAG 问答模式                        ║");
-        System.out.println("║  输入问题，获取基于攻略的回答+来源            ║");
+        System.out.println("║  输入问题，获取基于文档的回答+来源            ║");
         System.out.println("║  输入 /quit 退出   输入 /help 查看帮助        ║");
         System.out.println("╚══════════════════════════════════════════════╝");
         System.out.println();
@@ -208,7 +208,7 @@ public class Main {
 
                 // RAG 问答
                 try {
-                    System.out.println("\n⏳ 正在检索攻略并生成回答...");
+                    System.out.println("\n⏳ 正在检索文档并生成回答...");
                     RagAnswer answer = ragService.ask(input);
                     System.out.println("\n" + answer.toFormattedString());
                 } catch (Exception e) {
@@ -225,7 +225,7 @@ public class Main {
 
     /**
      * 阶段 2 的交互循环：Agent 模式。
-     * 大模型自主判断该查攻略还是该算数，并调用对应工具。
+     * 大模型自主判断该查文档还是该算数，并调用对应工具。
      *
      * 控制台会打印每次工具调用的信息（通过日志），
      * 方便在答辩时展示 Agent 的工作过程。
@@ -234,7 +234,7 @@ public class Main {
         System.out.println();
         System.out.println("╔══════════════════════════════════════════════╗");
         System.out.println("║  阶段 2：Agent 智能问答模式                  ║");
-        System.out.println("║  AI 自主选择：查攻略 或 计算                  ║");
+        System.out.println("║  AI 自主选择：查文档 或 计算                  ║");
         System.out.println("║  输入 /quit 退出   输入 /help 查看帮助        ║");
         System.out.println("╚══════════════════════════════════════════════╝");
         System.out.println();
@@ -342,26 +342,26 @@ public class Main {
         System.out.println("\n📖 帮助信息：");
         if (mode.equals("phase1")) {
             System.out.println("  这是 RAG 模式，程序会：");
-            System.out.println("  1. 在你的攻略知识库中检索相关内容");
+            System.out.println("  1. 在你的文档知识库中检索相关内容");
             System.out.println("  2. 将检索到的片段作为参考资料交给大模型");
-            System.out.println("  3. 大模型基于攻略内容生成回答并标注来源");
+            System.out.println("  3. 大模型基于文档内容生成回答并标注来源");
             System.out.println();
             System.out.println("  你可以问：");
-            System.out.println("  - \"暗影领主怎么打？\"");
-            System.out.println("  - \"星光草在哪刷？\"");
-            System.out.println("  - \"冰霜巨龙推荐什么阵容？\"");
-            System.out.println("  - \"暗影精华有什么用？\"");
+            System.out.println("  - \"这份文件讲了什么？\"");
+            System.out.println("  - \"帮我总结一下文档要点\"");
+            System.out.println("  - \"文件里关于XX是怎么说的？\"");
+            System.out.println("  - \"提取文档中的关键数据\"");
         } else {
             System.out.println("  这是 Agent 模式，AI 会自主判断：");
-            System.out.println("  - 查攻略问题 → 调用'查攻略工具'");
+            System.out.println("  - 文档查询问题 → 调用'查文档工具'");
             System.out.println("  - 计算问题 → 调用'计算工具'");
-            System.out.println("  - 复合问题 → 先查攻略，再计算");
+            System.out.println("  - 复合问题 → 先查文档，再计算");
             System.out.println();
             System.out.println("  你可以问：");
-            System.out.println("  - \"暗影领主怎么打？\"（纯攻略查询）");
-            System.out.println("  - \"1200攻击打80000血的BOSS要几刀？\"（纯计算）");
-            System.out.println("  - \"我需要30个暗影精华，要刷几次暗影领主？\"（先查掉率、再计算）");
-            System.out.println("  - \"做3件暗系装备需要多少龙鳞碎片？\"（先查配方、再计算）");
+            System.out.println("  - \"这份文件讲了什么？\"（文档查询）");
+            System.out.println("  - \"1200元打8折要多少钱？\"（纯计算）");
+            System.out.println("  - \"文件里提到的三种方案各降价20%后是多少？\"（先查文档、再计算）");
+            System.out.println("  - \"文档里出现了几次关键词？\"（文档分析）");
         }
         System.out.println();
     }
@@ -372,8 +372,8 @@ public class Main {
     private static void printBanner() {
         System.out.println();
         System.out.println("╔══════════════════════════════════════════════╗");
-        System.out.println("║          🎮 游戏攻略智能问答助手              ║");
-        System.out.println("║          Game Strategy Q&A Assistant         ║");
+        System.out.println("║            📄 资料分析助手 Mochi               ║");
+        System.out.println("║          Document Analysis Assistant          ║");
         System.out.println("║          基于 RAG + 通义千问 qwen-plus       ║");
         System.out.println("╚══════════════════════════════════════════════╝");
         System.out.println();
